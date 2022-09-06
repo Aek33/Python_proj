@@ -5,6 +5,7 @@ from collections import Counter
 
 import vk_api
 import pandas as pd
+import networkx as nx
 
 from config import VK_API_1
 
@@ -159,9 +160,32 @@ def get_group_members_info(group_id: int, from_file: bool = False, save_csv: boo
     return info_str
 
 
+def create_group_graph(group_id: int):
+    user_list = get_group_members(group_id)
+    users_friends_dict = {}
+    for user in user_list:
+        try:
+            users_friends_dict[user] = vk.friends.get(user_id=user)['items']
+        except vk_api.exceptions.ApiError as e:
+            print(e)
+            continue
+
+    g = nx.Graph(directed=False)
+    for user in users_friends_dict:
+        g.add_node(user)
+        for friend in users_friends_dict[user]:
+            if user != friend and user in user_list and friend in user_list:
+                g.add_edge(user, friend)
+
+    pos = nx.graphviz_layout(g, prog="neato")
+    nx.draw(g, pos, node_size=30, with_labels=False, width=0.2)
+    return users_friends_dict
+
+
 if __name__ == "__main__":
     # part 1
     # get_users_groups_member_count(group_id=target_group_id, from_file=True, save_csv=True)
     # part 2
-    get_group_members_info(group_id=target_group_id, from_file=True, save_csv=True)
+    # get_group_members_info(group_id=target_group_id, from_file=True, save_csv=True)
     # part 3
+    create_group_graph(target_group_id)
