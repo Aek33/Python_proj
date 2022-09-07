@@ -2,14 +2,16 @@ import time
 import re
 from datetime import date, datetime
 from collections import Counter
+import multiprocessing as mp
+import matplotlib.pyplot as plt
 
 import vk_api
 import pandas as pd
 import networkx as nx
+from pyvis.network import Network
+from config import VK_API_2
 
-from config import VK_API_1
-
-vk_session = vk_api.VkApi(token=VK_API_1)
+vk_session = vk_api.VkApi(token=VK_API_2)
 vk = vk_session.get_api()
 
 target_group_id = 197217619
@@ -20,6 +22,7 @@ def timer(func):
         start_time = time.time()
         func(*args, **kwargs)
         print(f"Execution time: {time.time() - start_time}")
+
     return wrapper
 
 
@@ -76,7 +79,7 @@ def get_users_groups_member_count(group_id: int, from_file: bool = False, save_c
     print(f"Топ-10 групп по числу участников\n{df.head(10)}")
     # Конец return df
     if save_csv:
-        df.to_csv("./members_groups_member_count")
+        df.to_csv("./members_groups_member_count.csv")
     return users_groups
 
 
@@ -91,9 +94,9 @@ def get_age(bdate: str):
 @timer
 def get_group_members_info(group_id: int, from_file: bool = False, save_csv: bool = False):
     if from_file:
-        dataframe = pd.read_csv("group_members_info")
+        dataframe = pd.read_csv("group_members_info.csv")
     else:
-    # Начало
+        # Начало
         user_id_list, active_list, sex_list, age_list, country_list, city_list = [], [], [], [], [], []
         user_list = get_group_members(group_id)
         user_list = [user_list[i:i + 1000] for i in range(0, len(user_list), 1000)]
@@ -128,7 +131,7 @@ def get_group_members_info(group_id: int, from_file: bool = False, save_csv: boo
             index=user_id_list)
         # Если нужно сохранить данные
         if save_csv:
-            dataframe.to_csv(f"./group_members_info")
+            dataframe.to_csv(f"./group_members_info.csv")
     # Блок обработки
     members_count = len(dataframe)
     dataframe = dataframe.loc[dataframe["active"]]
@@ -160,25 +163,48 @@ def get_group_members_info(group_id: int, from_file: bool = False, save_csv: boo
     return info_str
 
 
-def create_group_graph(group_id: int):
-    user_list = get_group_members(group_id)
-    users_friends_dict = {}
-    for user in user_list:
-        try:
-            users_friends_dict[user] = vk.friends.get(user_id=user)['items']
-        except vk_api.exceptions.ApiError as e:
-            print(e)
-            continue
+def get_users_friends(user_id: int):
+    try:
+        _id = user_id
+        _items = vk.friends.get(user_id=user_id)['items']
+        return _id, _items
+    except vk_api.exceptions.ApiError:
+        _id = user_id
+        _items = [-1]
+        return _id, _items
 
+
+@timer
+def create_group_graph(group_id: int = None, from_file: bool = False, save_csv: bool = False):
+    if from_file:
+        users_friends_dict = pd.read_csv("members_friends.csv", index_col=[0], converters={"0": pd.eval})["0"].to_dict()
+        user_list = users_friends_dict.keys()
+    elif group_id is not None:
+        user_list = get_group_members(group_id)
+        pool = mp.Pool(4)
+        results = pool.map(get_users_friends, [user for user in user_list])
+        pool.close()
+        users_friends_dict = {}
+        for result in results:
+            users_friends_dict[result[0]] = result[1]
+        if save_csv:
+            pd.Series(users_friends_dict).to_csv("members_friends.csv")
+    else:
+        return -1
+    count = 0
     g = nx.Graph(directed=False)
     for user in users_friends_dict:
         g.add_node(user)
         for friend in users_friends_dict[user]:
             if user != friend and user in user_list and friend in user_list:
                 g.add_edge(user, friend)
-
-    pos = nx.graphviz_layout(g, prog="neato")
-    nx.draw(g, pos, node_size=30, with_labels=False, width=0.2)
+                count += 1
+    # net = Network(height="1000px", width="1000px")
+    # net.from_nx(g)
+    # net.show("graph.html")
+    print(count)
+    nx.draw_spring(g)
+    plt.show()
     return users_friends_dict
 
 
@@ -188,4 +214,4 @@ if __name__ == "__main__":
     # part 2
     # get_group_members_info(group_id=target_group_id, from_file=True, save_csv=True)
     # part 3
-    create_group_graph(target_group_id)
+    create_group_graph(from_file=True, save_csv=True)
