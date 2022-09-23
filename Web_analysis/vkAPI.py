@@ -1,21 +1,53 @@
 from time import perf_counter
-import multiprocessing as mp
-
+import re
+from datetime import date, datetime
 import asyncio
 import requests
 import nest_asyncio
-import pandas as pd
 
 from aiohttp import ClientSession
+from database import PostgresDB
 from config import VK_TOKENS
 
 nest_asyncio.apply()
+db = PostgresDB()
 
 
 def cutter(lst: list, n: int) -> list: return [lst[i:i + n] for i in range(0, len(lst), n)]
 
 
 def offset_count(count: int) -> int: return count // 1000 + 1 if count % 1000 != 0 else count // 1000
+
+
+def get_age(bdate: str):
+    if re.match("^[0-9]{1,2}.[0-9]{1,2}.[0-9]{4}$", bdate) is not None:
+        _date = datetime.strptime(bdate, "%d.%m.%Y")
+        return date.today().year - _date.year - ((date.today().month, date.today().day) < (_date.month, _date.day))
+    else:
+        return -1
+
+
+def process_user_info(user_info: list):
+    d = user_info[0]
+    user_id = d['id']
+    active = False if 'deactivated' in d else True
+    age = get_age(d['bdate']) if 'bdate' in d else -1
+    sex = d['sex'] if 'sex' in d else -1
+    if 'counters' in d:
+        friends_count = d['counters']['friends'] if 'friends' in d['counters'] else -1
+        groups_count = d['counters']['groups'] if 'groups' in d['counters'] else 0
+    else:
+        friends_count = -1
+        groups_count = -1
+    if 'is_closed' in d:
+        is_closed = d['is_closed']
+    else:
+        is_closed = True
+    country = d['country']['title'].replace("'", "") if 'country' in d else "unknown"
+    city = d['city']['title'].replace("'", "") if 'city' in d else "unknown"
+    first_name = d['first_name'].replace("'", "") if 'first_name' in d else "unknown"
+    last_name = d['last_name'].replace("'", "") if 'last_name' in d else "unknown"
+    return user_id, active, age, sex, friends_count, groups_count, country, city, first_name, last_name, is_closed
 
 
 class Investigator:
@@ -36,62 +68,52 @@ class Investigator:
                     raise Exception(f"VK API error\n{response}")
                 return response['response']
 
-    async def process_execute(self, query: list, tokens: list):
+    async def process_execute(self, query: list):
         query = cutter(query, 25)
         async with ClientSession() as session:
             tasks = []
             for part in query:
-                token = tokens.pop(0)
+                token = self.token_list.pop(0)
                 tasks.append(asyncio.ensure_future(self.execute_request(session, part, token)))
-                tokens.append(token)
+                self.token_list.append(token)
             return await asyncio.gather(*tasks)
 
-    def get_group_members(self, group_id: int, tokens: list):
-        request = f"https://api.vk.com/method/groups.getMembers?group_id={group_id}&access_token={tokens[0]}&v=5.131"
+    def get_group_members(self):
+        request = f"https://api.vk.com/method/groups.getMembers?group_id={self.group_id}" \
+                  f"&access_token={self.token_list[0]}&v=5.131"
         user_count = requests.get(request).json()
         if 'error' in user_count:
             raise Exception(f"VK API error\n{user_count}")
         user_count = requests.get(request).json()['response']['count']
         offset = offset_count(user_count)
-        user_set = set()
-        query_list = [f"API.groups.getMembers({{'group_id':{group_id},'offset':{offset}}})"
+        query_list = [f"API.groups.getMembers({{'group_id':{self.group_id},'offset':{offset}}})"
                       for offset in range(0, offset * 1000, 1000)]
-        response = asyncio.run(self.process_execute(query_list, tokens))
-        for data in response:
-            for items in data['response']:
-                user_set.update(items['items'])
+        response = asyncio.run(self.process_execute(query_list))
+        user_set = set()
+        for item in response[0]:
+            user_set.update(item['items'])
         return list(user_set)
 
-    def get_users_groups_members_count(self, group_id: int, tokens: list):
-        user_list = self.get_group_members(group_id, tokens)
-        query_list = [f"API.groups.get({{'user_id':{user},'extended':1,'fields':'members_count'}})"
-                      for user in user_list][:50]
-        groups_list = []
-        response = asyncio.run(self.process_execute(query_list, tokens))
+    def get_members_info(self):
+        user_list = self.get_group_members()
+        print(f"users id collected completed for {round(perf_counter() - self.timer, 3)} sec")
+        query_list = [f"API.users.get({{'user_ids':{user}, 'fields':'bdate, sex, counters, city, country'}})"
+                      for user in user_list]
+        response = asyncio.run(self.process_execute(query_list))
         print(f"async task completed for {round(perf_counter() - self.timer, 3)} sec")
-        for data in response:
-            for user in data['response']:
-                if not user:
-                    continue
-                for group in user['items']:
-                    if 'deactivated' in group or group['is_closed'] != 0:
-                        groups_list.append((group['id'], group['name'], -1))
-                    elif 'members_count' not in group:
-                        groups_list.append((group['id'], group['name'], -2))
-                    else:
-                        groups_list.append((group['id'], group['name'], group['members_count']))
-        df = pd.DataFrame(groups_list, columns=['id', 'name', 'members_count']).set_index('id').to_csv(
-            "groups_member_count.csv")
-        print(f"all task completed for {round(perf_counter() - self.timer, 3)} sec")
-        return df
+        for part in response:
+            for user in part:
+                if user:
+                    data = process_user_info(user)
+                    q = f"""
+                    INSERT INTO vk_parser.group_members
+                    (member_id, active, age, sex, friends_count, groups_count, country,
+                     city, first_name, last_name, is_closed) VALUES {data}"""
+                    db.modify(q)
+        print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
 
 if __name__ == "__main__":
-    # TLIST = VK_TOKENS
-    # target_group_id = 197217619
-    # get_users_groups_members_count(target_group_id, TLIST)
-    q = ", ".join([f"API.users.get({{'user_ids':{443331523}, 'fields':'city, country'}})", f"API.users.get({{'user_ids':{444037492}, 'fields':'city, country'}})"])
-
-    data = dict(code=f'return [{q}];', access_token=VK_TOKENS[2], v='5.131')
-    print(requests.post("https://api.vk.com/method/execute?", data=data).json())
-
+    target_group_id = 197217619
+    hololive = Investigator(target_group_id, VK_TOKENS)
+    hololive.get_members_info()
