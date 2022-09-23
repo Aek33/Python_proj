@@ -1,3 +1,5 @@
+# TODO: create database with columns (group_id:bigint PRIMARY KEY, access: bool g_name: str, members_count: int)
+# TODO: drop column users_groups
 from time import perf_counter
 import re
 from datetime import date, datetime
@@ -19,7 +21,7 @@ def cutter(lst: list, n: int) -> list: return [lst[i:i + n] for i in range(0, le
 def offset_count(count: int) -> int: return count // 1000 + 1 if count % 1000 != 0 else count // 1000
 
 
-def get_age(bdate: str):
+def get_age(bdate: str) -> int:
     if re.match("^[0-9]{1,2}.[0-9]{1,2}.[0-9]{4}$", bdate) is not None:
         _date = datetime.strptime(bdate, "%d.%m.%Y")
         return date.today().year - _date.year - ((date.today().month, date.today().day) < (_date.month, _date.day))
@@ -27,8 +29,8 @@ def get_age(bdate: str):
         return -1
 
 
-def process_user_info(user_info: list):
-    d = user_info[0]
+def process_user_info(users_info: list) -> tuple:
+    d = users_info[0]
     user_id = d['id']
     active = False if 'deactivated' in d else True
     age = get_age(d['bdate']) if 'bdate' in d else -1
@@ -48,6 +50,14 @@ def process_user_info(user_info: list):
     first_name = d['first_name'].replace("'", "") if 'first_name' in d else "unknown"
     last_name = d['last_name'].replace("'", "") if 'last_name' in d else "unknown"
     return user_id, active, age, sex, friends_count, groups_count, country, city, first_name, last_name, is_closed
+
+
+def process_group_info(group_info: dict) -> tuple:  # TODO Check it
+    active = False if 'deactivated' in group_info else True
+    group_id = group_info['id']
+    name = group_info['name'].replace("'", "") if 'name' in group_info else "unknown_group_name"
+    members_count = group_info['members_count'] if 'members_count' in group_info else -1
+    return group_id, active, name, members_count
 
 
 class Investigator:
@@ -95,6 +105,7 @@ class Investigator:
         return list(user_set)
 
     def get_members_info(self):
+        print(f"get_members_info started in {round(perf_counter() - self.timer, 3)} sec")
         user_list = self.get_group_members()
         print(f"users id collected completed for {round(perf_counter() - self.timer, 3)} sec")
         query_list = [f"API.users.get({{'user_ids':{user}, 'fields':'bdate, sex, counters, city, country'}})"
@@ -105,10 +116,21 @@ class Investigator:
             for user in part:
                 if user:
                     data = process_user_info(user)
-                    q = f"""
-                    INSERT INTO vk_parser.group_members
-                    (member_id, active, age, sex, friends_count, groups_count, country,
-                     city, first_name, last_name, is_closed) VALUES {data}"""
+                    q = f"""INSERT INTO vk_parser.group_members VALUES {data}"""  # TODO Check it
+                    db.modify(q)
+        print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
+
+    def get_users_groups_info(self):
+        print(f"get_users_groups_info started in {round(perf_counter() - self.timer, 3)} sec")
+        user_list = []  # TODO: make db query SELECT where user not is_closed
+        query_list = []  # TODO: make loop to fill vk query with offset
+        response = asyncio.run(self.process_execute(query_list))
+        print(f"async task completed for {round(perf_counter() - self.timer, 3)} sec")
+        for user_groups in response:
+            for group in user_groups['items']:
+                if group:
+                    data = process_group_info(group)
+                    q = f"""{data}"""  # TODO: make db query INSERT ON CONFLICT
                     db.modify(q)
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
