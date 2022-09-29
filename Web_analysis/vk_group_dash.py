@@ -1,3 +1,34 @@
+import json
+
+import plotly.express as px
+import pandas as pd
+
+from dash import Dash, dcc, html
+from database import pandas_connect
+
+target_group_id = 197217619
+with open(f"{target_group_id}.json", "r") as f:
+    group_metadata = json.loads(f.read())
+
+connect = pandas_connect()
+app = Dash(__name__)
+group_users = pd.read_sql_table("group_users", connect, "vk_parser")
+
+active_members_pieChart = px.pie()
+
+app.layout = html.Div([
+    html.H1(group_metadata["name"]),
+    html.Div([
+        html.P(group_metadata["description"])
+    ]),
+    html.Div(f"Members count: {group_metadata['members_count']}"),
+    dcc.Graph(
+        id='active_members_pieChart',
+        figure=active_members_pieChart)
+])
+if __name__ == "__main__":
+    print(group_users.head())
+
 # import time
 # import re
 # from datetime import date, datetime

@@ -1,3 +1,4 @@
+import json
 import re
 import asyncio
 
@@ -68,9 +69,13 @@ def process_user_info(users_info: list) -> tuple:
 
 def process_group_info(group_info: dict) -> tuple:
     active: bool = False if 'deactivated' in group_info else True
+
     group_id: int = group_info['id']
+
     name: str = group_info['name'].replace("'", "") if 'name' in group_info else "unknown_group_name"
+
     members_count: int = group_info['members_count'] if 'members_count' in group_info else -1
+
     return group_id, active, name, members_count
 
 
@@ -106,6 +111,17 @@ class Investigator:
                 tasks.append(asyncio.ensure_future(self._execute_request(session, part, token)))
                 self.token_list.append(token)
             return await asyncio.gather(*tasks)
+
+    def get_group_info(self) -> None:
+        request: str = f"https://api.vk.com/method/groups.getById?group_id={self.group_id}" \
+                  f"&fields=description,members_count&access_token={self.token_list[0]}&v=5.131"
+        response: dict = requests.get(request).json()
+
+        if 'error' in response:
+            raise Exception(f"VK API error\n{self.group_id}")
+
+        with open(f'{response["response"][0]["id"]}.json', 'w') as f:
+            json.dump(response["response"][0], f)
 
     def get_group_members(self):
         request = f"https://api.vk.com/method/groups.getMembers?group_id={self.group_id}" \
@@ -146,7 +162,7 @@ class Investigator:
                 if user:
                     data = process_user_info(user)
                     q = f"INSERT INTO vk_parser.group_users VALUES {data}"
-                    db.modify(q)
+                    db.insert(q)
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
     def get_members_groups(self) -> None:
@@ -173,7 +189,7 @@ class Investigator:
                         data = process_group_info(items)
                         q = f"INSERT INTO  vk_parser.users_groups " \
                             f"VALUES {data} ON CONFLICT ON CONSTRAINT users_groups_pk DO NOTHING;"
-                        db.modify(q)
+                        db.insert(q)
 
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
@@ -212,7 +228,7 @@ class Investigator:
             .groupby(by=['user']).sum().to_dict()
 
         for item in data['friends'].items():
-            db.modify(f"INSERT INTO vk_parser.users_friends VALUES ({item[0]}, '{set(item[1])}')"
+            db.insert(f"INSERT INTO vk_parser.users_friends VALUES ({item[0]}, '{set(item[1])}')"
                       f"ON CONFLICT ON CONSTRAINT users_friends_pk DO NOTHING")
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
@@ -220,8 +236,10 @@ class Investigator:
 if __name__ == "__main__":
     target_group_id = 197217619
     hololive_pics = Investigator(target_group_id, VK_TOKENS)
+    hololive_pics.get_group_info()
     # hololive_pics.get_group_members()
     # hololive_pics.get_members_info()
     # hololive_pics.get_members_groups()
     # hololive_pics.get_members_friends()
+    db.close()
 
