@@ -1,0 +1,49 @@
+body {
+    background-color: #282a36;
+}
+
+@font-face {
+    font-family: sf-pro-display-regular;
+    src: url('SFPRODISPLAYREGULAR.OTF');
+}
+
+.header{
+    font-family: sf-pro-display-regular, sans-serif;
+    font-size: 17px;
+    color: #f8f8f2;
+    padding-left: 50px;
+    padding-right: 50px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.header img{
+    width: 100px;
+    border-radius: 50%;
+}
+
+.banner {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin: 10px 100px 10px 100px;
+}
+
+.banner P{
+    color: #f8f8f2;
+    font-family: sf-pro-display-regular, sans-serif;
+    margin-bottom: 5px;
+}
+
+.banner Span{
+    color: #f8f8f2;
+    font-family: sf-pro-display-regular, sans-serif;
+    margin-left: 50px;
+}
+
+.container-top {
+    display: flex;
+    flex-direction: row;
+}
