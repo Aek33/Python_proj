@@ -1,9 +1,8 @@
 from psycopg2 import connect
 from config import DB_CONFIG
-from sqlalchemy import create_engine
 
 
-class PostgresDB:
+class Database:
     def __init__(self):
         self.conn = connect(dbname=DB_CONFIG['database'], user=DB_CONFIG['db_user'],
                             password=DB_CONFIG['password'], host=DB_CONFIG['host'])

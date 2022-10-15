@@ -1,29 +1,26 @@
-import json
-import re
-import asyncio
+from json import dump
+from re import match
+from time import perf_counter
+from datetime import date, datetime
+from collections import Counter
 
+import asyncio
 import nest_asyncio
 import requests
 import pandas as pd
-
-from time import perf_counter
-from datetime import date, datetime
 from aiohttp import ClientSession
-from database import PostgresDB
+
+from database import Database
 from config import VK_TOKENS
 
 nest_asyncio.apply()
-db = PostgresDB()
 
 
-def cutter(lst: list[str], n: int) -> list[list]: return [lst[i:i + n] for i in range(0, len(lst), n)]
-
-
-def offset_count(count: int, div: int) -> int: return count // div + 1 if count % div != 0 else count // div
+def offset_count(count: int, offset: int) -> int: return count // offset + (count % offset != 0)
 
 
 def get_age(bdate: str) -> int:
-    if re.match("^[0-9]{1,2}.[0-9]{1,2}.[0-9]{4}$", bdate) is not None:
+    if match("^[0-9]{1,2}.[0-9]{1,2}.[0-9]{4}$", bdate) is not None:
         dtime_date: datetime = datetime.strptime(bdate, "%d.%m.%Y")
         age: int = date.today().year - dtime_date.year - ((date.today().month, date.today().day)
                                                           < (dtime_date.month, dtime_date.day))
@@ -74,14 +71,23 @@ def process_group_info(group_info: dict) -> tuple:
 
     name: str = group_info['name'].replace("'", "") if 'name' in group_info else "unknown_group_name"
 
-    members_count: int = group_info['members_count'] if 'members_count' in group_info else -1
-
-    return group_id, active, name, members_count
+    return group_id, active, name
 
 
-class Investigator:
+class VKAPIError(Exception):
+    """Exception class for handling VK API exception.
+    Rises when get 'error' instead of 'response' in response json from request to VK API"""
+    def __init__(self, token, message):
+        self.token = token
+        self.message = message
 
-    def __init__(self, group_id: int, token_list: list[str]):
+    def __str__(self):
+        return f'VK API Error in response!\n{self.message}\nwith token\n{self.token}'
+
+
+class VKParser:
+    def __init__(self, group_id: int, token_list: list[str], db: Database):
+        self.db = db
         self.group_id = group_id
         self.token_list = token_list
         self.timer = perf_counter()
@@ -96,13 +102,11 @@ class Investigator:
             async with session.post(self.execute_url, data=data) as resp:
                 response: dict = await resp.json()
                 if 'error' in response:
-                    print(response)
-                    print(access_token)
-                    raise Exception(f"VK API error\n{response}")
+                    raise VKAPIError(access_token, response)
                 return response['response']
 
     async def _process_execute(self, query: list[str]):
-        query = cutter(query, 25)
+        query = [query[i:i + 25] for i in range(0, len(query), 25)]
 
         async with ClientSession() as session:
             tasks = []
@@ -113,26 +117,27 @@ class Investigator:
             return await asyncio.gather(*tasks)
 
     def get_group_info(self) -> None:
+        """Writing target group metadata to json file"""
         request: str = f"https://api.vk.com/method/groups.getById?group_id={self.group_id}" \
-                  f"&fields=description,members_count&access_token={self.token_list[0]}&v=5.131"
+                       f"&fields=description,members_count&access_token={self.token_list[0]}&v=5.131"
         response: dict = requests.get(request).json()
 
         if 'error' in response:
-            raise Exception(f"VK API error\n{self.group_id}")
+            raise VKAPIError(self.token_list[0], response)
 
-        with open(f'{response["response"][0]["id"]}.json', 'w') as f:
-            json.dump(response["response"][0], f)
+        with open(f'{response["response"][0]["screen_name"]}.json', 'w') as f:
+            dump(response["response"][0], f)
 
     def get_group_members(self):
+        """Returns users id of the target group"""
         request = f"https://api.vk.com/method/groups.getMembers?group_id={self.group_id}" \
                   f"&access_token={self.token_list[0]}&v=5.131"
         user_count: dict = requests.get(request).json()
         if 'error' in user_count:
-            raise Exception(f"VK API error\n{user_count}")
+            raise VKAPIError(self.token_list[0], user_count)
 
         user_count: int = requests.get(request).json()['response']['count']
         offset = offset_count(user_count, 1000)
-        assert offset > 0
 
         query_list = [f"API.groups.getMembers({{'group_id':{self.group_id},'offset':{offset * 1000}}})"
                       for offset in range(offset)]
@@ -142,11 +147,10 @@ class Investigator:
         user_set = set()
         for item in response[0]:
             user_set.update(item['items'])
-
-        list(user_set)
         return list(user_set)
 
     def get_members_info(self) -> None:
+        """Collecting and inserting into database target group users attributes"""
         print(f"get_members_info started in {round(perf_counter() - self.timer, 3)} sec")
 
         user_list = self.get_group_members()
@@ -162,44 +166,54 @@ class Investigator:
                 if user:
                     data = process_user_info(user)
                     q = f"INSERT INTO vk_parser.group_users VALUES {data}"
-                    db.insert(q)
+                    self.db.insert(q)
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
     def get_members_groups(self) -> None:
+        """Collecting and inserting into database list of all groups, which include target group members.
+        Each row include group id, group name, group status, and popularity among target group users"""
         print(f"get_users_groups_info started in {round(perf_counter() - self.timer, 3)} sec")
 
         q_select = "SELECT member_id, groups_count FROM vk_parser.group_users WHERE active=TRUE and is_closed=FALSE"
-        user_list = db.select(q_select)
+        user_list = self.db.select(q_select)
 
         query_list = []
         for user in user_list:
             offset = offset_count(user[1], 500)
-            assert offset > 0
-            temp_list = [f"API.groups.get({{'user_id':{user[0]}, 'extended':1, 'fields':'members_count',"
-                         f" 'offset':{offset * 500}, 'count':500}})" for offset in range(offset)]
+            temp_list = [f"API.groups.get({{'user_id':{user[0]}, 'extended':1, 'offset':{offset * 500}, 'count':500}})"
+                         for offset in range(offset)]
             query_list += temp_list
-
         response = asyncio.run(self._process_execute(query_list))
         print(f"async task completed for {round(perf_counter() - self.timer, 3)} sec")
 
+        groups_ids, groups_access, groups_names = [], [], []
         for user_groups in response:
             for group_list in user_groups:
                 if group_list:
                     for items in group_list['items']:
                         data = process_group_info(items)
-                        q = f"INSERT INTO  vk_parser.users_groups " \
-                            f"VALUES {data} ON CONFLICT ON CONSTRAINT users_groups_pk DO NOTHING;"
-                        db.insert(q)
+                        groups_ids.append(data[0])
+                        groups_access.append(data[1])
+                        groups_names.append(data[2])
 
+        dataframe = pd.DataFrame({'group_id': groups_ids, 'access': groups_access, 'group_name': groups_names})
+        groups_id_count = dict(Counter(dataframe['group_id']))
+        dataframe = dataframe.drop_duplicates()
+        dataframe['popularity'] = dataframe['group_id'].map(groups_id_count)
+        data_list = list(dataframe.to_records(index=False))
+
+        for record in data_list:
+            self.db.insert(f"INSERT INTO vk_parser.users_groups VALUES {record}")
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
 
     def get_members_friends(self):
+        """Collecting and inserting into database target group users friend ids lists"""
         print(f"get_members_friends started in {round(perf_counter() - self.timer, 3)} sec")
 
         q_select = "SELECT member_id, friends_count " \
                    "FROM vk_parser.group_users " \
                    "WHERE active=TRUE and is_closed=FALSE and friends_count > 0"
-        user_list = db.select(q_select)
+        user_list = self.db.select(q_select)
 
         query_list = []
         user_accounting_list = []
@@ -228,18 +242,19 @@ class Investigator:
             .groupby(by=['user']).sum().to_dict()
 
         for item in data['friends'].items():
-            db.insert(f"INSERT INTO vk_parser.users_friends VALUES ({item[0]}, '{set(item[1])}')"
-                      f"ON CONFLICT ON CONSTRAINT users_friends_pk DO NOTHING")
+            self.db.insert(f"INSERT INTO vk_parser.users_friends VALUES ({item[0]}, '{set(item[1])}')"
+                           f"ON CONFLICT ON CONSTRAINT users_friends_pk DO NOTHING")
         print(f"all tasks completed for {round(perf_counter() - self.timer, 3)} sec")
+
+    def __del__(self):
+        self.db.close()
 
 
 if __name__ == "__main__":
     target_group_id = 197217619
-    hololive_pics = Investigator(target_group_id, VK_TOKENS)
-    hololive_pics.get_group_info()
-    # hololive_pics.get_group_members()
+    postgresql_db = Database()
+    hololive_pics = VKParser(target_group_id, VK_TOKENS, postgresql_db)
+    # hololive_pics.get_group_info()
     # hololive_pics.get_members_info()
-    # hololive_pics.get_members_groups()
+    hololive_pics.get_members_groups()
     # hololive_pics.get_members_friends()
-    db.close()
-
